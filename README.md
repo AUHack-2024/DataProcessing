@@ -1,3 +1,4 @@
+# Accelerated image processing using JAX for surveillance camera assistance
 
 The rise of artificial intelligence in security and surveillance has led to an increased demand for high-performance image processing systems. Surveillance cameras, especially in areas with high traffic like airports, shopping malls, and public transit stations, require rapid and efficient processing of video feeds to assist with monitoring. Here, the use of JAX, a high-performance numerical computing library developed by Google, emerges as a game-changer. Leveraging JAX for image processing in surveillance applications enables faster computations, which is really needed when talking about multiple video feeds processed in real-time. 
 
@@ -121,33 +122,69 @@ def get_tiles(img, subdiv=5):
 After getting the tiles, we then need to compute SSIM
 
 ```python
-def ssim(tiles_1, tiles_2, subdiv=10):
-
-def get_ssim_tile(tile_1, tile_2):
-
-mu_x = jnp.mean(tile_1)
-
-mu_y = jnp.mean(tile_2)
-
-sigma_x = jnp.std(tile_1)
-
-sigma_y = jnp.std(tile_2)
-
-sigma_xy = jnp.mean((tile_1 - mu_x) * (tile_2 - mu_y)) #covariance
-
-c1 = 0.01
-
-c2 = 0.03
-
-ssim = (2 * mu_x * mu_y + c1) * (2 * sigma_xy + c2) / ((mu_x**2 + mu_y**2 + c1) * (sigma_x**2 + sigma_y**2 + c2))
-
-return ssim
-
-tiles_1 = get_tiles(img_1, subdiv)
-
-tiles_2 = get_tiles(img_2, subdiv)
-
-ssim_values = jax.vmap(get_ssim_tile)(tiles_1, tiles_2)
-
-return jnp.mean(ssim_values)
+def ssim(img_1, img_2, subdiv=10):
+	def get_ssim_tile(tile_1, tile_2):	
+		mu_x = jnp.mean(tile_1)	
+		mu_y = jnp.mean(tile_2)	
+		sigma_x = jnp.std(tile_1)	
+		sigma_y = jnp.std(tile_2)	
+		sigma_xy = jnp.mean((tile_1 - mu_x) * (tile_2 - mu_y)) #covariance
+		
+		c1 = 0.01	
+		c2 = 0.03
+		
+		ssim = (2 * mu_x * mu_y + c1) * (2 * sigma_xy + c2) / ((mu_x**2 + mu_y**2 + c1) * (sigma_x**2 + sigma_y**2 + c2))
+		return ssim
+	
+	tiles_1 = get_tiles(img_1, subdiv)
+	tiles_2 = get_tiles(img_2, subdiv)
+	ssim_values = jax.vmap(get_ssim_tile)(tiles_1, tiles_2)
+	
+	return jnp.mean(ssim_values)
 ```
+
+#### 2) MSE + Blur
+
+The second algorithm is a simple Mean Squares Error but blurring the image first to attempt to reduce the effect of small pixel sized changes that might affect the output. 
+
+```python
+def blur(img, window=50):
+	#Simple gaussian blurr
+	x = jnp.linspace(-3, 3, window)
+	window = jsp.stats.norm.pdf(x) * jsp.stats.norm.pdf(x[:, None])
+	window = window / jnp.sum(window, keepdims=True)
+	return jsp.signal.convolve2d(img, window, mode='same')
+
+def mse(img_1, img_2):
+	blur_img_1 = blur(img_1, 50)#need a sufficiently large window to see good results
+	blur_img_2 = blur(img_2, 50)	
+	return jnp.mean((blur_img_1 - blur_img_2)**2)
+	
+```
+
+#### Combining the algorithms
+
+After getting the scores from both algorithms we then need to combine the two results. Here, a simple weighting of each algorithm can help. 
+
+```python
+
+def get_scores(frame1, frame2, w1=0.75, w2=0.25):
+	frame1 = frame1[:, :, :3]	
+	frame2 = frame2[:, :, :3]
+	
+	assert w1 + w2 == 1, "Weights must sum to 1"
+	
+	f1 = resize_square(normalize_lumincance(to_grayscale(frame1)))#preprocessing
+	f2 = resize_square(normalize_lumincance(to_grayscale(frame2)))
+	
+	ssim_score = ssim(f1, f2)
+	mse_score = mse(f1, f2)
+
+	def norm_mse(z, slope=80):
+		return 1/(z/slope + 1)
+		
+	norm_mse_score = norm_mse(mse_score)
+	
+	return w1 * ssim_score + w2 * norm_mse_score
+```
+
